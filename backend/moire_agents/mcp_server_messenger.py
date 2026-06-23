@@ -113,6 +113,18 @@ async def list_tools():
 @server.call_tool()
 async def call_tool(name: str, arguments: dict):
     a = arguments or {}
+    # C4 — messenger whitelist guard: only approved recipients (the user's own
+    # number/contacts) may receive outbound messages. Flag MESSENGER_WHITELIST_ENABLED
+    # (default OFF = no restriction); fail-safe (a guard error never blocks a send).
+    if name in ("clawdbot_send_message", "send_to_channel"):
+        try:
+            from messenger_whitelist import guard as _wl_guard
+            _ok, _reason = _wl_guard(a.get("recipient") or a.get("channel") or "")
+            if not _ok:
+                return [TextContent(type="text",
+                                    text=json.dumps({"error": _reason, "blocked": True}, indent=2))]
+        except Exception:
+            pass  # guard import/error must never block a legitimate send
     try:
         if name in _ASYNC:
             result = await _ASYNC[name](a)
