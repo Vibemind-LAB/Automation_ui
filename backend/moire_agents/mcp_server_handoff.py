@@ -4002,7 +4002,7 @@ def _bump_skill_usage(path: str) -> bool:
     the actual search response.
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
         if not text.startswith("---"):
             return False
@@ -4034,7 +4034,7 @@ def _bump_skill_usage(path: str) -> bool:
         if not found_last_searched:
             new_lines.append(f'last_searched: "{datetime.utcnow().isoformat()}"')
 
-        new_text = "---\n" + "\n".join(new_lines) + rest
+        new_text = "---" + "\n".join(new_lines) + rest
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_text)
         return True
@@ -4145,7 +4145,7 @@ def _skill_save_and_index(app: str, skill_name: str, frontmatter: dict, body: st
             # New skill: mark it agent-created and seed curator bookkeeping
             # fields server-side — never trust the caller-supplied dict for
             # this. See docs/superpowers/specs/2026-07-10-skill-curator-design.md.
-            frontmatter.setdefault("agent_created", True)
+            frontmatter["agent_created"] = True
             frontmatter.setdefault("attempts", 0)
             frontmatter.setdefault("curator_status", "active")
             frontmatter.setdefault("last_searched", None)

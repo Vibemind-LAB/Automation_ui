@@ -80,3 +80,51 @@ def test_skill_save_and_index_existing_file_not_flipped_to_agent_created(tmp_pat
     # Pass-through behavior for edits to an existing file is unchanged:
     # only whatever the caller supplied is written, no defaults injected.
     assert "agent_created" not in text
+
+
+def test_skill_save_and_index_new_skill_agent_created_cannot_be_overridden_false(tmp_path, monkeypatch):
+    monkeypatch.setattr(h, "_SKILL_LIB_ROOT", str(tmp_path))
+
+    result = h._skill_save_and_index(
+        "testapp",
+        "spoofed-skill",
+        {"name": "spoofed-skill", "description": "d", "agent_created": False},
+        "Body\n",
+    )
+
+    assert result["success"] is True
+    with open(result["path"], "r", encoding="utf-8") as f:
+        text = f.read()
+    # Server-side invariant wins over caller-supplied input for brand-new skills.
+    assert "agent_created: true" in text
+
+
+def test_bump_skill_usage_no_blank_line_for_bare_frontmatter(tmp_path, monkeypatch):
+    monkeypatch.setattr(h, "_SKILL_LIB_ROOT", str(tmp_path))
+    # Realistic shape of every pre-existing skill: only name/description,
+    # no attempts:/last_searched: lines at all.
+    path = _write_skill(tmp_path, "testapp", "bare-skill")
+
+    assert h._bump_skill_usage(path) is True
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    assert not text.startswith("---\n\n")
+    assert "attempts: 1" in text
+    assert "last_searched:" in text
+
+
+def test_bump_skill_usage_twice_does_not_compound_blank_lines(tmp_path, monkeypatch):
+    monkeypatch.setattr(h, "_SKILL_LIB_ROOT", str(tmp_path))
+    path = _write_skill(tmp_path, "testapp", "bare-skill-2")
+
+    assert h._bump_skill_usage(path) is True
+    assert h._bump_skill_usage(path) is True
+
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    assert not text.startswith("---\n\n")
+    assert "attempts: 2" in text
+    # Frontmatter block must still open with a single "---" line, not one
+    # followed by a run of blank lines from repeated joins.
+    fm_start = text.split("\n", 1)[1]
+    assert not fm_start.startswith("\n")
