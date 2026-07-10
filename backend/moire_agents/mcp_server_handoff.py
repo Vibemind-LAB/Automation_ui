@@ -4043,6 +4043,51 @@ def _bump_skill_usage(path: str) -> bool:
         return False
 
 
+_CURATOR_FIELDS = ("agent_created", "attempts", "curator_status", "last_searched", "pinned")
+
+
+def _read_curator_fields(path: str) -> dict:
+    """Best-effort: read the curator-managed frontmatter fields from an
+    existing SKILL.md, so ``_skill_save_and_index`` can preserve them across
+    edits that don't explicitly resupply them. Dependency-light, matching
+    this file's existing frontmatter-handling style. Never raises.
+    """
+    fields = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        if not text.startswith("---"):
+            return fields
+        end = text.find("\n---", 3)
+        if end == -1:
+            return fields
+        for line in text[3:end].splitlines():
+            stripped = line.strip()
+            if ":" not in stripped:
+                continue
+            key, _, raw_value = stripped.partition(":")
+            key = key.strip()
+            if key not in _CURATOR_FIELDS:
+                continue
+            value = raw_value.strip().strip('"').strip("'")
+            if value.lower() == "true":
+                fields[key] = True
+            elif value.lower() == "false":
+                fields[key] = False
+            elif value.lower() in ("null", "none", ""):
+                fields[key] = None
+            elif key == "attempts":
+                try:
+                    fields[key] = int(value)
+                except ValueError:
+                    fields[key] = value
+            else:
+                fields[key] = value
+    except Exception as e:
+        logger.error(f"_read_curator_fields failed for {path}: {e}")
+    return fields
+
+
 def _skill_search(query: str, agent=None, limit: int = 5) -> dict:
     """Search the adaptive-skill library for SKILL.md files matching ``query``.
 
@@ -4150,8 +4195,21 @@ def _skill_save_and_index(app: str, skill_name: str, frontmatter: dict, body: st
             frontmatter.setdefault("curator_status", "active")
             frontmatter.setdefault("last_searched", None)
             frontmatter.setdefault("pinned", False)
+        else:
+            # Editing an existing skill: preserve curator-managed bookkeeping
+            # fields the caller didn't explicitly resupply, instead of
+            # silently dropping them (which would exit curator lifecycle
+            # management with no error).
+            missing = [f for f in _CURATOR_FIELDS if f not in frontmatter]
+            if missing:
+                existing = _read_curator_fields(path)
+                for f in missing:
+                    if f in existing:
+                        frontmatter[f] = existing[f]
 
         def _yaml_scalar(v) -> str:
+            if v is None:
+                return "null"
             if isinstance(v, bool):
                 return "true" if v else "false"
             if isinstance(v, (int, float)):
