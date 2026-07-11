@@ -3992,6 +3992,102 @@ def _read_skill_meta(path: str) -> dict:
     return {"description": description, "body": body}
 
 
+def _bump_skill_usage(path: str) -> bool:
+    """Best-effort: increment ``attempts`` and set ``last_searched`` to now in
+    an existing SKILL.md's frontmatter.
+
+    Dependency-light (no external YAML lib, matching ``_read_skill_meta``'s
+    style). Never raises — returns False on any failure so callers like
+    ``_skill_search`` can safely ignore tracking failures without affecting
+    the actual search response.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        if not text.startswith("---"):
+            return False
+        end = text.find("\n---", 3)
+        if end == -1:
+            return False
+        fm_lines = text[3:end].splitlines()
+        rest = text[end:]
+
+        found_attempts = False
+        found_last_searched = False
+        new_lines = []
+        for line in fm_lines:
+            stripped = line.strip()
+            if stripped.lower().startswith("attempts:"):
+                try:
+                    attempts = int(stripped.split(":", 1)[1].strip())
+                except ValueError:
+                    attempts = 0
+                new_lines.append(f"attempts: {attempts + 1}")
+                found_attempts = True
+            elif stripped.lower().startswith("last_searched:"):
+                new_lines.append(f'last_searched: "{datetime.utcnow().isoformat()}"')
+                found_last_searched = True
+            else:
+                new_lines.append(line)
+        if not found_attempts:
+            new_lines.append("attempts: 1")
+        if not found_last_searched:
+            new_lines.append(f'last_searched: "{datetime.utcnow().isoformat()}"')
+
+        new_text = "---" + "\n".join(new_lines) + rest
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        return True
+    except Exception as e:
+        logger.error(f"_bump_skill_usage failed for {path}: {e}")
+        return False
+
+
+_CURATOR_FIELDS = ("agent_created", "attempts", "curator_status", "last_searched", "pinned")
+
+
+def _read_curator_fields(path: str) -> dict:
+    """Best-effort: read the curator-managed frontmatter fields from an
+    existing SKILL.md, so ``_skill_save_and_index`` can preserve them across
+    edits that don't explicitly resupply them. Dependency-light, matching
+    this file's existing frontmatter-handling style. Never raises.
+    """
+    fields = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        if not text.startswith("---"):
+            return fields
+        end = text.find("\n---", 3)
+        if end == -1:
+            return fields
+        for line in text[3:end].splitlines():
+            stripped = line.strip()
+            if ":" not in stripped:
+                continue
+            key, _, raw_value = stripped.partition(":")
+            key = key.strip()
+            if key not in _CURATOR_FIELDS:
+                continue
+            value = raw_value.strip().strip('"').strip("'")
+            if value.lower() == "true":
+                fields[key] = True
+            elif value.lower() == "false":
+                fields[key] = False
+            elif value.lower() in ("null", "none", ""):
+                fields[key] = None
+            elif key == "attempts":
+                try:
+                    fields[key] = int(value)
+                except ValueError:
+                    fields[key] = value
+            else:
+                fields[key] = value
+    except Exception as e:
+        logger.error(f"_read_curator_fields failed for {path}: {e}")
+    return fields
+
+
 def _skill_search(query: str, agent=None, limit: int = 5) -> dict:
     """Search the adaptive-skill library for SKILL.md files matching ``query``.
 
@@ -4044,7 +4140,10 @@ def _skill_search(query: str, agent=None, limit: int = 5) -> dict:
             lim = int(limit)
         except (TypeError, ValueError):
             lim = 5
-        return {"success": True, "results": results[: max(0, lim)]}
+        top_results = results[: max(0, lim)]
+        for r in top_results:
+            _bump_skill_usage(r["path"])
+        return {"success": True, "results": top_results}
     except Exception as e:
         logger.error(f"_skill_search failed: {e}")
         return {"success": False, "results": [], "error": str(e)}
@@ -4086,7 +4185,31 @@ def _skill_save_and_index(app: str, skill_name: str, frontmatter: dict, body: st
         os.makedirs(skill_dir, exist_ok=True)
         path = os.path.join(skill_dir, "SKILL.md")
 
+        frontmatter = dict(frontmatter or {})
+        if not os.path.exists(path):
+            # New skill: mark it agent-created and seed curator bookkeeping
+            # fields server-side — never trust the caller-supplied dict for
+            # this. See docs/superpowers/specs/2026-07-10-skill-curator-design.md.
+            frontmatter["agent_created"] = True
+            frontmatter.setdefault("attempts", 0)
+            frontmatter.setdefault("curator_status", "active")
+            frontmatter.setdefault("last_searched", None)
+            frontmatter.setdefault("pinned", False)
+        else:
+            # Editing an existing skill: preserve curator-managed bookkeeping
+            # fields the caller didn't explicitly resupply, instead of
+            # silently dropping them (which would exit curator lifecycle
+            # management with no error).
+            missing = [f for f in _CURATOR_FIELDS if f not in frontmatter]
+            if missing:
+                existing = _read_curator_fields(path)
+                for f in missing:
+                    if f in existing:
+                        frontmatter[f] = existing[f]
+
         def _yaml_scalar(v) -> str:
+            if v is None:
+                return "null"
             if isinstance(v, bool):
                 return "true" if v else "false"
             if isinstance(v, (int, float)):
@@ -4099,7 +4222,7 @@ def _skill_save_and_index(app: str, skill_name: str, frontmatter: dict, body: st
             return s
 
         lines = ["---"]
-        for k, v in (frontmatter or {}).items():
+        for k, v in frontmatter.items():
             lines.append(f"{k}: {_yaml_scalar(v)}")
         lines.append("---")
         lines.append("")
