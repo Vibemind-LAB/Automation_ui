@@ -51,6 +51,14 @@ class TypeRequest(BaseModel):
     interval: float = 0.0
 
 
+class KeyRequest(BaseModel):
+    key: str
+
+
+class HotkeyRequest(BaseModel):
+    keys: List[str]
+
+
 class ShellRequest(BaseModel):
     command: str
     timeout: int = 30
@@ -173,6 +181,20 @@ async def mcp_type(req: TypeRequest):
     """Type text via the generic handle_action handler."""
     fn = _resolve("_action")
     return await fn(action_type="type", params={"text": req.text})
+
+
+@router.post("/key")
+async def mcp_key(req: KeyRequest):
+    """Press one key via the generic handle_action handler."""
+    fn = _resolve("_action")
+    return await fn(action_type="press", params={"key": req.key})
+
+
+@router.post("/hotkey")
+async def mcp_hotkey(req: HotkeyRequest):
+    """Press a key combination via the generic handle_action handler."""
+    fn = _resolve("_action")
+    return await fn(action_type="hotkey", params={"keys": "+".join(req.keys)})
 
 
 @router.post("/shell")

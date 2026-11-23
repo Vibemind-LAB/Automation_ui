@@ -35,6 +35,19 @@ class HostFrameData(BaseModel):
     metadata: Dict[str, Any] = {}
 
 
+def _jpeg_size(data: bytes) -> tuple:
+    """Width and height of a JPEG, (0, 0) when it cannot be read."""
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            return image.size
+    except Exception:
+        return (0, 0)
+
+
 @router.get("/status")
 @log_api_request(logger)
 async def get_live_desktop_status(request: Request):
@@ -57,15 +70,18 @@ async def get_live_desktop_status(request: Request):
                 status_code=503, detail="Live desktop service not available"
             )
 
-        status = await desktop_service.get_status()
+        # get_status is a plain method; awaiting it answered every call with 500.
+        status = desktop_service.get_status()
+        screen_info = await desktop_service.get_screen_info()
 
         return JSONResponse(
             content={
                 "success": True,
-                "streaming": status.get("streaming", False),
-                "clients": status.get("client_count", 0),
-                "fps": status.get("fps", 10),
-                "resolution": status.get("resolution", {"width": 1920, "height": 1080}),
+                "streaming": status.get("streaming_active", False),
+                "clients": status.get("connected_clients", 0),
+                "fps": status.get("stream_config", {}).get("frame_rate", 10),
+                "resolution": screen_info.get("resolution"),
+                "capture_available": screen_info.get("capture_available", False),
             }
         )
 
@@ -139,9 +155,7 @@ async def get_desktop_screen_info(request: Request):
             content={
                 "success": True,
                 "screen_info": screen_info,
-                "resolution": screen_info.get(
-                    "resolution", {"width": 1920, "height": 1080}
-                ),
+                "resolution": screen_info.get("resolution"),
                 "scale_factor": screen_info.get("scale_factor", 1.0),
                 "monitors": screen_info.get("monitors", []),
             }
@@ -152,10 +166,26 @@ async def get_desktop_screen_info(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/monitors")
+async def list_desktop_monitors(request: Request):
+    """Monitors of this machine: count and geometry, numbered from 1 (primary)."""
+    app = request.app
+    if not hasattr(app.state, "service_manager"):
+        raise HTTPException(status_code=503, detail="Service manager not available")
+    desktop_service = app.state.service_manager.get_service("live_desktop")
+    if not desktop_service:
+        raise HTTPException(status_code=503, detail="Live desktop service not available")
+    monitors = await desktop_service.list_monitors()
+    if not monitors:
+        raise HTTPException(status_code=503, detail="Screen cannot be read")
+    return JSONResponse(
+        content={"success": True, "count": len(monitors), "monitors": monitors}
+    )
+
+
 @router.get("/screenshot")
-@log_api_request(logger)
-async def take_desktop_screenshot(request: Request):
-    """Take a screenshot of the current desktop"""
+async def take_desktop_screenshot(request: Request, monitor: int = 1):
+    """Take a screenshot of one monitor (1 = primary; 0 is read as 1)."""
     try:
         # Access service through FastAPI app state
         app = request.app
@@ -180,8 +210,11 @@ async def take_desktop_screenshot(request: Request):
                 status_code=503, detail="Desktop service does not support screenshots"
             )
 
-        # Take screenshot
-        screenshot_data = await desktop_service.take_screenshot()
+        # Monitors count from 1. Callers that still send 0 mean the primary one.
+        monitor = max(monitor, 1)
+        screenshot_data = await desktop_service.take_screenshot(monitor=monitor)
+        if not screenshot_data:
+            raise HTTPException(status_code=404, detail=f"No monitor {monitor}")
 
         if screenshot_data:
             # Handle both dict and raw bytes responses
@@ -197,11 +230,13 @@ async def take_desktop_screenshot(request: Request):
                 import base64
                 from datetime import datetime
 
+                width, height = _jpeg_size(screenshot_data)
                 result = {
                     "data": base64.b64encode(screenshot_data).decode("ascii"),
-                    "format": "png",
-                    "width": 0,
-                    "height": 0,
+                    "format": "jpeg",
+                    "width": width,
+                    "height": height,
+                    "monitor": monitor,
                     "timestamp": datetime.now().isoformat(),
                 }
             else:
@@ -377,3 +412,41 @@ async def get_cache_status():
     except Exception as e:
         logger.error(f"Get cache status error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Desktop task journal (read-only) ────────────────────────────────────────
+# The VibeMind desktop space records every task it runs on this screen as one JSON
+# file (id, what was asked, the steps taken, how it ended). The app polls this route
+# next to the picture, so the person watching sees what is happening and why.
+
+
+def _task_dir():
+    import os
+    from pathlib import Path
+
+    own = os.environ.get("VIBEMIND_DESKTOP_AUFGABEN_DIR", "").strip()
+    if own:
+        return Path(own)
+    base = os.environ.get("LOCALAPPDATA", "").strip()
+    if base:
+        return Path(base) / "VibeMind" / "desktop-aufgaben"
+    return Path.home() / ".vibemind" / "desktop-aufgaben"
+
+
+@router.get("/task")
+async def get_latest_desktop_task():
+    """The most recent desktop task with its steps, or task: null when there is none."""
+    import json
+    import re
+
+    folder = _task_dir()
+    pattern = re.compile(r"^dt-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
+    names = sorted(p.stem for p in folder.glob("dt-*.json") if pattern.match(p.stem)) if folder.is_dir() else []
+    stopped = (folder / "STOP").exists()
+    if not names:
+        return JSONResponse(content={"success": True, "task": None, "stopped": stopped})
+    try:
+        task = json.loads((folder / f"{names[-1]}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HTTPException(status_code=500, detail="Task journal cannot be read")
+    return JSONResponse(content={"success": True, "task": task, "stopped": stopped})

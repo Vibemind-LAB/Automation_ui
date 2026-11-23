@@ -31,7 +31,11 @@ class LiveDesktopService:
         }
         self.screenshot_cache: Optional[bytes] = None
         self.last_screenshot_time = 0
-        self.screenshot_cache_duration = 1.0  # Cache for 1 second
+        # The app polls about five times a second. A longer cache made the picture
+        # lag a full second behind what happens on the screen.
+        self.screenshot_cache_duration = 0.2
+        # monitor index (1 = primary, as mss counts) -> (time, jpeg bytes)
+        self._monitor_cache: Dict[int, tuple] = {}
 
         # Stream callbacks for WebSocket connections
         self.frame_callbacks: List[Callable[[bytes], None]] = []
@@ -120,45 +124,65 @@ class LiveDesktopService:
             return False
 
     async def take_screenshot(
-        self, encode_base64: bool = False
+        self, encode_base64: bool = False, monitor: int = 1
     ) -> Optional[str | bytes]:
-        """Take a screenshot of the desktop"""
+        """Take a JPEG screenshot of one monitor (1 = primary, as mss counts)."""
         try:
             current_time = time.time()
 
-            # Use cached screenshot if recent enough
-            if (
-                self.screenshot_cache
-                and current_time - self.last_screenshot_time
-                < self.screenshot_cache_duration
-            ):
-                logger.debug("📸 Using cached screenshot")
-                if encode_base64:
-                    return base64.b64encode(self.screenshot_cache).decode("utf-8")
-                return self.screenshot_cache
+            cached = self._monitor_cache.get(monitor)
+            if cached and current_time - cached[0] < self.screenshot_cache_duration:
+                screenshot_data = cached[1]
+            else:
+                screenshot_data = await self._capture_desktop(monitor)
+                if not screenshot_data:
+                    logger.warning("⚠️ Screenshot capture returned no data")
+                    return None
+                self._monitor_cache[monitor] = (current_time, screenshot_data)
+                if monitor == 1:
+                    self.screenshot_cache = screenshot_data
+                    self.last_screenshot_time = current_time
 
-            # Take new screenshot
-            screenshot_data = await self._capture_desktop()
-
-            if screenshot_data:
-                self.screenshot_cache = screenshot_data
-                self.last_screenshot_time = current_time
-
-                logger.debug(f"📸 Screenshot captured: {len(screenshot_data)} bytes")
-
-                if encode_base64:
-                    return base64.b64encode(screenshot_data).decode("utf-8")
-                return screenshot_data
-
-            logger.warning("⚠️ Screenshot capture returned no data")
-            return None
+            if encode_base64:
+                return base64.b64encode(screenshot_data).decode("utf-8")
+            return screenshot_data
 
         except Exception as e:
             logger.error(f"❌ Screenshot capture failed: {e}")
             return None
 
-    async def _capture_desktop(self) -> Optional[bytes]:
-        """Capture desktop screenshot using mss (real screen capture)."""
+    @staticmethod
+    def _list_monitors() -> List[Dict[str, Any]]:
+        """The real monitors, in the order mss numbers them (1-based)."""
+        import mss
+
+        with mss.mss() as sct:
+            real = sct.monitors[1:]
+        return [
+            {
+                "index": position,
+                "primary": position == 1,
+                "geometry": {
+                    "left": int(mon["left"]),
+                    "top": int(mon["top"]),
+                    "width": int(mon["width"]),
+                    "height": int(mon["height"]),
+                },
+            }
+            for position, mon in enumerate(real, start=1)
+        ]
+
+    async def list_monitors(self) -> List[Dict[str, Any]]:
+        """Monitor list with geometry; empty when the screen cannot be read."""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self._list_monitors)
+        except Exception as e:
+            logger.error(f"❌ Failed to list monitors: {e}")
+            return []
+
+    async def _capture_desktop(self, monitor: int = 1) -> Optional[bytes]:
+        """Capture one monitor with mss and return JPEG bytes."""
         try:
             import io
 
@@ -169,18 +193,14 @@ class LiveDesktopService:
 
             def _grab():
                 with mss.mss() as sct:
-                    # Grab the primary monitor (index 1); index 0 is "all monitors combined"
-                    monitor = sct.monitors[1]
-                    sct_img = sct.grab(monitor)
-                    # Convert to PIL Image using .rgb (already in RGB byte order)
+                    # Index 0 is "all monitors combined"; real monitors start at 1.
+                    if monitor < 1 or monitor >= len(sct.monitors):
+                        return None
+                    sct_img = sct.grab(sct.monitors[monitor])
                     img = Image.frombytes("RGB", sct_img.size, sct_img.rgb)
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=70)
-                    result = buf.getvalue()
-                    logger.debug(
-                        f"📸 Captured {sct_img.size.width}x{sct_img.size.height} → {len(result)} bytes JPEG"
-                    )
-                    return result
+                    return buf.getvalue()
 
             return await loop.run_in_executor(None, _grab)
 
@@ -316,33 +336,35 @@ class LiveDesktopService:
             )
 
     async def get_screen_info(self) -> Dict[str, Any]:
-        """Get screen information"""
-        try:
-            # Mock screen information - in real implementation,
-            # this would query actual screen properties
-            screen_info = {
-                "screens": [
-                    {
-                        "id": 0,
-                        "primary": True,
-                        "width": 1920,
-                        "height": 1080,
-                        "x": 0,
-                        "y": 0,
-                        "scale_factor": 1.0,
-                    }
-                ],
-                "total_width": 1920,
-                "total_height": 1080,
-                "capture_available": True,
-            }
-
-            logger.debug(f"📺 Screen info: {screen_info}")
-            return screen_info
-
-        except Exception as e:
-            logger.error(f"❌ Failed to get screen info: {e}")
-            return {"error": str(e), "capture_available": False}
+        """Screen information read from the real monitors."""
+        monitors = await self.list_monitors()
+        if not monitors:
+            return {"screens": [], "monitors": [], "capture_available": False}
+        geometries = [m["geometry"] for m in monitors]
+        left = min(g["left"] for g in geometries)
+        top = min(g["top"] for g in geometries)
+        right = max(g["left"] + g["width"] for g in geometries)
+        bottom = max(g["top"] + g["height"] for g in geometries)
+        primary = geometries[0]
+        return {
+            "screens": [
+                {
+                    "id": m["index"],
+                    "primary": m["primary"],
+                    "width": m["geometry"]["width"],
+                    "height": m["geometry"]["height"],
+                    "x": m["geometry"]["left"],
+                    "y": m["geometry"]["top"],
+                    "scale_factor": 1.0,
+                }
+                for m in monitors
+            ],
+            "monitors": monitors,
+            "resolution": {"width": primary["width"], "height": primary["height"]},
+            "total_width": right - left,
+            "total_height": bottom - top,
+            "capture_available": True,
+        }
 
     async def get_available_monitors(self) -> List[Dict[str, Any]]:
         """Get list of available desktop monitors/clients for streaming
