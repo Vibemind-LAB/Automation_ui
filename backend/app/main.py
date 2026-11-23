@@ -141,6 +141,13 @@ async def lifespan(app: FastAPI):
         logger.info("Cleanup completed")
 
 
+def shell_routes_enabled() -> bool:
+    """True only when AUTOMATION_UI_ENABLE_SHELL=1 is set for this process."""
+    import os
+
+    return os.environ.get("AUTOMATION_UI_ENABLE_SHELL", "").strip() == "1"
+
+
 def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
 
@@ -176,7 +183,10 @@ def create_app() -> FastAPI:
     app.include_router(
         node_configs_router, prefix="/api/node-configs", tags=["Node Configurations"]
     )
-    app.include_router(shell_router, prefix="/api/shell", tags=["Shell"])
+    # The shell routes run commands for whoever can reach this port, without any
+    # login. They are off unless the operator switches them on for this process.
+    if shell_routes_enabled():
+        app.include_router(shell_router, prefix="/api/shell", tags=["Shell"])
 
     # Enable automation router for click functionality
     app.include_router(automation_router, prefix="/api/automation", tags=["Automation"])

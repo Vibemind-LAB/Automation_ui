@@ -199,7 +199,9 @@ async def mcp_hotkey(req: HotkeyRequest):
 
 @router.post("/shell")
 async def mcp_shell(req: ShellRequest):
-    """Execute a shell command. Implemented by Phase 1.3."""
+    """Execute a shell command. Off unless AUTOMATION_UI_ENABLE_SHELL=1 is set."""
+    if os.environ.get("AUTOMATION_UI_ENABLE_SHELL", "").strip() != "1":
+        raise HTTPException(status_code=403, detail="Shell routes are switched off")
     fn = _resolve("shell")
     return await fn(command=req.command, timeout=req.timeout, shell=req.shell)
 
