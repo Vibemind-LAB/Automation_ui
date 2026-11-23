@@ -152,6 +152,12 @@ def _uia_describe_control(ctrl) -> Dict[str, Any]:
         info["is_keyboard_focusable"] = bool(ctrl.IsKeyboardFocusable)
     except Exception:
         info["is_keyboard_focusable"] = None
+    # Kennwortfeld laut Bedienhilfe (UIA IsPassword), auch ohne Namen. Die Sperrliste des
+    # Desktop-Space (spaces/desktop/blick.py) sperrt danach das ganze Fenster.
+    try:
+        info["is_password"] = bool(ctrl.IsPassword)
+    except Exception:
+        info["is_password"] = None
 
     # Discover supported patterns (== "actions").
     actions: List[str] = []
@@ -171,6 +177,12 @@ def _uia_describe_control(ctrl) -> Dict[str, Any]:
                 pat = getter()
                 if pat is not None:
                     actions.append(pattern_name)
+                    if pattern_name == "SelectionItem":
+                        # Auswahlzustand: die Nachpruefung der Vertragsaktion "auswahl" liest ihn.
+                        try:
+                            info["is_selected"] = bool(pat.IsSelected)
+                        except Exception:
+                            pass
         except Exception:
             continue
     info["supported_actions"] = actions
