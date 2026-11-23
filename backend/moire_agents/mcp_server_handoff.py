@@ -39,6 +39,13 @@ os.environ.setdefault("USE_JAX", "0")
 os.environ.setdefault("USE_FLAX", "0")
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 
+# One BLAS thread unless the operator says otherwise. Every OpenBLAS copy (numpy,
+# scipy) allocates a buffer per CPU core at import time: on a 32-core machine this
+# module committed 1.74 GB and started 53 threads, with the limit 0.29 GB and 7
+# (measured 2026-11-23). Several tool servers import this module and none of them
+# does heavy linear algebra. Must stay above anything that can load numpy.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 # Add parent to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
