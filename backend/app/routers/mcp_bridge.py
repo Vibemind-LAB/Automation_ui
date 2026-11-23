@@ -241,6 +241,18 @@ async def mcp_scroll_to(
     return await fn(target=target, element_type=element_type, then_click=then_click)
 
 
+@router.get("/elements")
+async def mcp_elements(max_elements: int = 60):
+    """Read-only: the active window and its clickable controls with their bounds."""
+    import mcp_server_handoff as mcp  # type: ignore
+
+    window = await mcp.handle_get_focus()
+    controls = await mcp.handle_list_actionable(
+        window_hwnd=None, max_elements=max(1, min(max_elements, 200))
+    )
+    return {"success": bool(controls.get("success")), "window": window, **controls}
+
+
 @router.get("/read-screen")
 async def mcp_read_screen():
     """Capture screenshot and read text via OCR."""

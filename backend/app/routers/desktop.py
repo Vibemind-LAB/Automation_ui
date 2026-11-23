@@ -440,8 +440,8 @@ async def get_latest_desktop_task():
     import re
 
     folder = _task_dir()
-    pattern = re.compile(r"^dt-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
-    names = sorted(p.stem for p in folder.glob("dt-*.json") if pattern.match(p.stem)) if folder.is_dir() else []
+    pattern = re.compile(r"dt-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}")
+    names = sorted(p.stem for p in folder.glob("dt-*.json") if pattern.fullmatch(p.stem)) if folder.is_dir() else []
     stopped = (folder / "STOP").exists()
     if not names:
         return JSONResponse(content={"success": True, "task": None, "stopped": stopped})

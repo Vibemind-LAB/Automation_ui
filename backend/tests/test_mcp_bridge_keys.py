@@ -29,3 +29,12 @@ def test_key_and_hotkey_reach_the_action_handler(calls):
     assert client.post("/api/mcp/key", json={"key": "enter"}).json() == {"success": True}
     assert client.post("/api/mcp/hotkey", json={"keys": ["ctrl", "s"]}).json() == {"success": True}
     assert calls == [("press", {"key": "enter"}), ("hotkey", {"keys": "ctrl+s"})]
+
+
+def test_elements_route_reads_the_active_window_without_acting():
+    app = FastAPI()
+    app.include_router(mcp_bridge.router, prefix="/api/mcp")
+    body = TestClient(app).get("/api/mcp/elements?max_elements=5").json()
+    assert "window" in body and "success" in body
+    if body["success"]:
+        assert len(body["elements"]) <= 5
